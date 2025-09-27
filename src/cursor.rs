@@ -52,19 +52,22 @@ impl<'a> Cursor<'a> {
         Some(b)
     }
     #[inline]
-    pub fn advance(&mut self, n: usize) -> usize {
-        let rem = self.remaining();
-        let step = if n > rem { rem } else { n };
-        self.i += step;
-        step
+    pub fn advance(&mut self, n: usize) -> Option<(usize, usize)> {
+        if n > self.remaining() {
+            return None;
+        }
+        let start = self.i;
+        self.i += n;
+        Some((start, self.i))
     }
     #[inline]
-    pub fn skip_byte(&mut self, b: u8) -> bool {
-        if self.peek() == Some(b) {
+    pub fn skip_byte(&mut self, b: u8) -> Option<(usize, usize)> {
+        let start = self.i;
+        if self.peek()? == b {
             self.i += 1;
-            true
+            Some((start, self.i))
         } else {
-            false
+            None
         }
     }
 
@@ -77,79 +80,60 @@ impl<'a> Cursor<'a> {
     pub fn reset(&mut self, m: usize) {
         self.i = m.min(self.buf.len());
     }
+    #[inline]
+    pub fn slice_from(&self, m: usize) -> &'a [u8] {
+        &self.buf[m.min(self.buf.len())..self.i.min(self.buf.len())]
+    }
 
-    // ASCII whitespace utilities
+    // ASCII whitespace
     #[inline]
     pub const fn is_space_ascii(b: u8) -> bool {
         matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C' | b'\x0B')
     }
     #[inline]
-    pub fn skip_space(&mut self) -> usize {
-        let start = self.i;
-        while let Some(&b) = self.buf.get(self.i) {
-            if !Self::is_space_ascii(b) {
-                break;
-            }
-            self.i += 1;
-        }
-        self.i - start
+    pub fn take_space(&mut self) -> Option<(usize, usize)> {
+        self.take_while(Self::is_space_ascii)
     }
 
     // Scanning and matching
     // Skip until delimiter b or EOF; does not consume the delimiter.
     #[inline]
-    pub fn skip_until(&mut self, b: u8) -> usize {
+    pub fn skip_until(&mut self, b: u8) -> (usize, usize) {
+        let start = self.i;
         if let Some(off) = self.buf[self.i..].iter().position(|&x| x == b) {
             self.i += off;
-            off
         } else {
-            let rem = self.remaining();
             self.i = self.buf.len();
-            rem
         }
+        (start, self.i)
     }
 
     // Match a byte sequence; consumes on success.
     #[inline]
-    pub fn match_bytes(&mut self, pat: &[u8]) -> bool {
+    pub fn match_bytes(&mut self, pat: &[u8]) -> Option<(usize, usize)> {
+        let start = self.i;
         if self.buf[self.i..].starts_with(pat) {
             self.i += pat.len();
-            true
-        } else {
-            false
-        }
-    }
-
-    // Expect a byte sequence; consumes on success, otherwise rolls back.
-    #[inline]
-    pub fn expect_bytes(&mut self, pat: &[u8]) -> bool {
-        let m = self.mark();
-        if self.match_bytes(pat) {
-            true
-        } else {
-            self.reset(m);
-            false
-        }
-    }
-
-    // Take ASCII word [A-Za-z0-9_]+; returns slice range as (start, end)
-    #[inline]
-    pub fn take_ident_ascii(&mut self) -> Option<(usize, usize)> {
-        let start = self.i;
-        while let Some(&b) = self.buf.get(self.i) {
-            let is_ident = b.is_ascii_alphanumeric() || b == b'_';
-            if !is_ident {
-                break;
-            }
-            self.i += 1;
-        }
-        if self.i > start {
             Some((start, self.i))
         } else {
             None
         }
     }
 
+    // Expect a byte sequence; consumes on success, otherwise rolls back.
+    #[inline]
+    pub fn expect_bytes(&mut self, pat: &[u8]) -> Option<(usize, usize)> {
+        let m = self.mark();
+        match self.match_bytes(pat) {
+            Some(span) => Some(span),
+            None => {
+                self.reset(m);
+                None
+            }
+        }
+    }
+
+    // Identifiers and numbers
     #[inline]
     pub const fn is_ident_start_ascii(b: u8) -> bool {
         matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'_')
@@ -159,7 +143,13 @@ impl<'a> Cursor<'a> {
         b.is_ascii_alphanumeric() || b == b'_'
     }
 
-    // Ident starting with letter/_ then [A-Za-z0-9_]*. Returns (start, end).
+    // [A-Za-z0-9_]+
+    #[inline]
+    pub fn take_ident_ascii(&mut self) -> Option<(usize, usize)> {
+        self.take_while(Self::is_ident_continue_ascii)
+    }
+
+    // [A-Za-z_][A-Za-z0-9_]*
     #[inline]
     pub fn take_ident_starting_alpha(&mut self) -> Option<(usize, usize)> {
         let start = self.i;
@@ -176,22 +166,15 @@ impl<'a> Cursor<'a> {
         Some((start, self.i))
     }
 
-    // Decimal integer: [0-9]+
+    // [0-9]+
     #[inline]
     pub fn take_int_ascii(&mut self) -> Option<(usize, usize)> {
-        let start = self.i;
-        if !matches!(self.peek(), Some(b'0'..=b'9')) {
-            return None;
-        }
-        while matches!(self.peek(), Some(b'0'..=b'9')) {
-            self.i += 1;
-        }
-        Some((start, self.i))
+        self.take_while(|b| b.is_ascii_digit())
     }
 
-    // Skip while predicate holds; returns bytes skipped.
+    // Predicate-based
     #[inline]
-    pub fn skip_while(&mut self, mut pred: impl FnMut(u8) -> bool) -> usize {
+    pub fn skip_while(&mut self, mut pred: impl FnMut(u8) -> bool) -> (usize, usize) {
         let start = self.i;
         while let Some(&b) = self.buf.get(self.i) {
             if !pred(b) {
@@ -199,10 +182,8 @@ impl<'a> Cursor<'a> {
             }
             self.i += 1;
         }
-        self.i - start
+        (start, self.i)
     }
-
-    // Take while predicate holds; returns (start, end).
     #[inline]
     pub fn take_while(&mut self, mut pred: impl FnMut(u8) -> bool) -> Option<(usize, usize)> {
         let start = self.i;
@@ -219,77 +200,29 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    // Expect a single byte with rollback on failure.
+    // Single-byte expectation with rollback
     #[inline]
-    pub fn expect_byte(&mut self, b: u8) -> bool {
+    pub fn expect_byte(&mut self, b: u8) -> Option<(usize, usize)> {
         let m = self.mark();
-        if self.skip_byte(b) {
-            true
+        if let Some(span) = self.skip_byte(b) {
+            Some(span)
         } else {
             self.reset(m);
-            false
+            None
         }
     }
 
-    // Advance until an unescaped delimiter; does not consume the delimiter.
-    // Returns bytes advanced and whether delimiter was found.
-    #[inline]
-    pub fn take_until_unescaped(&mut self, delim: u8, esc: u8) -> (usize, bool) {
-        let start = self.i;
-        while let Some(b) = self.peek() {
-            if b == esc {
-                self.i += 1; // skip escape
-                if !self.eof() {
-                    self.i += 1;
-                } // skip escaped char
-                continue;
-            }
-            if b == delim {
-                break;
-            }
-            self.i += 1;
-        }
-        (self.i - start, self.peek() == Some(delim))
-    }
-
-    // Like above, but stops on either a or b; returns which delimiter if found.
-    #[inline]
-    pub fn take_until_unescaped2(&mut self, a: u8, b: u8, esc: u8) -> (usize, Option<u8>) {
-        let start = self.i;
-        while let Some(ch) = self.peek() {
-            if ch == esc {
-                self.i += 1;
-                if !self.eof() {
-                    self.i += 1;
-                }
-                continue;
-            }
-            if ch == a || ch == b {
-                break;
-            }
-            self.i += 1;
-        }
-        let found = match self.peek() {
-            Some(x) if x == a || x == b => Some(x),
-            _ => None,
-        };
-        (self.i - start, found)
-    }
-
-    // Non-consuming peek for a slice prefix.
+    // Prefix/slice peeking
     #[inline]
     pub fn starts_with(&self, pat: &[u8]) -> bool {
         self.buf[self.i..].starts_with(pat)
     }
-
-    // Peek a slice of length n from current pos.
     #[inline]
     pub fn peek_slice(&self, n: usize) -> Option<&'a [u8]> {
         self.buf.get(self.i..self.i + n)
     }
 }
 
-// Allow idiomatic iteration over bytes: for b in cursor { ... }
 impl<'a> Iterator for Cursor<'a> {
     type Item = u8;
     #[inline]
