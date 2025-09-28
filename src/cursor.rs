@@ -1,3 +1,5 @@
+use core::ops::Range;
+
 #[derive(Debug)]
 pub struct Cursor<'a> {
     buf: &'a [u8],
@@ -52,20 +54,20 @@ impl<'a> Cursor<'a> {
         Some(b)
     }
     #[inline]
-    pub fn advance(&mut self, n: usize) -> Option<(usize, usize)> {
+    pub fn advance(&mut self, n: usize) -> Option<Range<usize>> {
         if n > self.remaining() {
             return None;
         }
         let start = self.i;
         self.i += n;
-        Some((start, self.i))
+        Some(start..self.i)
     }
     #[inline]
-    pub fn skip_byte(&mut self, b: u8) -> Option<(usize, usize)> {
+    pub fn skip_byte(&mut self, b: u8) -> Option<Range<usize>> {
         let start = self.i;
         if self.peek()? == b {
             self.i += 1;
-            Some((start, self.i))
+            Some(start..self.i)
         } else {
             None
         }
@@ -91,38 +93,35 @@ impl<'a> Cursor<'a> {
         matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'\x0C' | b'\x0B')
     }
     #[inline]
-    pub fn take_space(&mut self) -> Option<(usize, usize)> {
+    pub fn take_space(&mut self) -> Option<Range<usize>> {
         self.take_while(Self::is_space_ascii)
     }
 
     // Scanning and matching
-    // Skip until delimiter b or EOF; does not consume the delimiter.
     #[inline]
-    pub fn skip_until(&mut self, b: u8) -> (usize, usize) {
+    pub fn skip_until(&mut self, b: u8) -> Range<usize> {
         let start = self.i;
         if let Some(off) = self.buf[self.i..].iter().position(|&x| x == b) {
             self.i += off;
         } else {
             self.i = self.buf.len();
         }
-        (start, self.i)
+        start..self.i
     }
 
-    // Match a byte sequence; consumes on success.
     #[inline]
-    pub fn match_bytes(&mut self, pat: &[u8]) -> Option<(usize, usize)> {
+    pub fn match_bytes(&mut self, pat: &[u8]) -> Option<Range<usize>> {
         let start = self.i;
         if self.buf[self.i..].starts_with(pat) {
             self.i += pat.len();
-            Some((start, self.i))
+            Some(start..self.i)
         } else {
             None
         }
     }
 
-    // Expect a byte sequence; consumes on success, otherwise rolls back.
     #[inline]
-    pub fn expect_bytes(&mut self, pat: &[u8]) -> Option<(usize, usize)> {
+    pub fn expect_bytes(&mut self, pat: &[u8]) -> Option<Range<usize>> {
         let m = self.mark();
         match self.match_bytes(pat) {
             Some(span) => Some(span),
@@ -143,15 +142,13 @@ impl<'a> Cursor<'a> {
         b.is_ascii_alphanumeric() || b == b'_'
     }
 
-    // [A-Za-z0-9_]+
     #[inline]
-    pub fn take_ident_ascii(&mut self) -> Option<(usize, usize)> {
+    pub fn take_ident_ascii(&mut self) -> Option<Range<usize>> {
         self.take_while(Self::is_ident_continue_ascii)
     }
 
-    // [A-Za-z_][A-Za-z0-9_]*
     #[inline]
-    pub fn take_ident_starting_alpha(&mut self) -> Option<(usize, usize)> {
+    pub fn take_ident_starting_alpha(&mut self) -> Option<Range<usize>> {
         let start = self.i;
         match self.peek() {
             Some(b) if Self::is_ident_start_ascii(b) => self.i += 1,
@@ -163,18 +160,17 @@ impl<'a> Cursor<'a> {
             }
             self.i += 1;
         }
-        Some((start, self.i))
+        Some(start..self.i)
     }
 
-    // [0-9]+
     #[inline]
-    pub fn take_int_ascii(&mut self) -> Option<(usize, usize)> {
+    pub fn take_int_ascii(&mut self) -> Option<Range<usize>> {
         self.take_while(|b| b.is_ascii_digit())
     }
 
     // Predicate-based
     #[inline]
-    pub fn skip_while(&mut self, mut pred: impl FnMut(u8) -> bool) -> (usize, usize) {
+    pub fn skip_while(&mut self, mut pred: impl FnMut(u8) -> bool) -> Range<usize> {
         let start = self.i;
         while let Some(&b) = self.buf.get(self.i) {
             if !pred(b) {
@@ -182,10 +178,10 @@ impl<'a> Cursor<'a> {
             }
             self.i += 1;
         }
-        (start, self.i)
+        start..self.i
     }
     #[inline]
-    pub fn take_while(&mut self, mut pred: impl FnMut(u8) -> bool) -> Option<(usize, usize)> {
+    pub fn take_while(&mut self, mut pred: impl FnMut(u8) -> bool) -> Option<Range<usize>> {
         let start = self.i;
         while let Some(&b) = self.buf.get(self.i) {
             if !pred(b) {
@@ -194,7 +190,7 @@ impl<'a> Cursor<'a> {
             self.i += 1;
         }
         if self.i > start {
-            Some((start, self.i))
+            Some(start..self.i)
         } else {
             None
         }
@@ -202,7 +198,7 @@ impl<'a> Cursor<'a> {
 
     // Single-byte expectation with rollback
     #[inline]
-    pub fn expect_byte(&mut self, b: u8) -> Option<(usize, usize)> {
+    pub fn expect_byte(&mut self, b: u8) -> Option<Range<usize>> {
         let m = self.mark();
         if let Some(span) = self.skip_byte(b) {
             Some(span)
